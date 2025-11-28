@@ -1,5 +1,5 @@
 yfinance
-numpy==1.26.4
+numpy==2.3.5
 pandas
 matplotlib
 quantstats==0.0.62
