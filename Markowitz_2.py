@@ -11,6 +11,12 @@ import warnings
 import argparse
 import sys
 
+# --- FIX FOR NUMPY 2.0+ COMPATIBILITY WITH QUANTSTATS ---
+# Quantstats relies on np.product which was removed in NumPy 2.0
+if not hasattr(np, 'product'):
+    np.product = np.prod
+# --------------------------------------------------------
+
 """
 Project Setup
 """
@@ -51,7 +57,8 @@ class MyPortfolio:
     NOTE: You can modify the initialization function
     """
 
-    def __init__(self, price, exclude, lookback=50, gamma=0):
+    def __init__(self, price, exclude, lookback=126, gamma=0):
+        # Default lookback changed to 126 (approx 6 months) for robust momentum
         self.price = price
         self.returns = price.pct_change().fillna(0)
         self.exclude = exclude
@@ -59,9 +66,9 @@ class MyPortfolio:
         self.gamma = gamma
 
     def calculate_weights(self):
-        # Get the assets by excluding the specified column
+        # Get the assets by excluding the specified column (SPY)
         assets = self.price.columns[self.price.columns != self.exclude]
-
+        
         # Calculate the portfolio weights
         self.portfolio_weights = pd.DataFrame(
             index=self.price.index, columns=self.price.columns
@@ -70,7 +77,54 @@ class MyPortfolio:
         """
         TODO: Complete Task 4 Below
         """
-        
+        lookback = self.lookback  # window for volatility estimation
+
+        # If we have a benchmark (e.g. SPY), use it for a simple trend filter
+        if self.exclude in self.price.columns:
+            mkt_price = self.price[self.exclude]
+            mkt_sma200 = mkt_price.rolling(200).mean()
+        else:
+            mkt_price = None
+            mkt_sma200 = pd.Series(index=self.price.index, data=np.nan)
+
+        for i, date in enumerate(self.price.index):
+            # rolling window of past returns up to "date"
+            # use at most `lookback` days, but if early in sample, just use whatever we have
+            window_returns = self.returns[assets].iloc[max(0, i - lookback) : i]
+
+            # need at least 2 observations to estimate volatility
+            if len(window_returns) < 2:
+                continue
+
+            # daily volatility estimate for each asset
+            vol = window_returns.std()
+
+            # handle zero/NaN vol (replace with cross-sectional mean)
+            vol = vol.replace(0, np.nan)
+            if vol.isna().all():
+                # pathological case: fall back to equal weights
+                w_assets = pd.Series(1.0 / len(assets), index=assets)
+            else:
+                vol = vol.fillna(vol.mean())
+                inv_vol = 1.0 / vol
+                w_assets = inv_vol / inv_vol.sum()
+
+            # --- Trend filter on SPY (or excluded asset) ---
+            # when market is below its 200-day SMA, scale down risk
+            scale = 1.0
+            if mkt_price is not None:
+                sma_val = mkt_sma200.loc[date]
+                px_val = mkt_price.loc[date]
+                if not np.isnan(sma_val) and px_val < sma_val:
+                    # de-risk in downtrend; you can tweak 0.4 → 0.3/0.5 etc.
+                    scale = 0.4
+
+            # set weights for sector ETFs (assets)
+            self.portfolio_weights.loc[date, assets] = (w_assets * scale).values
+
+            # no allocation to the excluded asset (e.g. SPY) → remaining is "cash"
+            if self.exclude in self.price.columns:
+                self.portfolio_weights.loc[date, self.exclude] = 0.0
         
         """
         TODO: Complete Task 4 Above

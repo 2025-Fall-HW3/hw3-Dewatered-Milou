@@ -31,16 +31,32 @@ assets = [
     "XLY",
 ]
 
+# Standard assignment period
 start = "2019-01-01"
 end = "2024-04-01"
 
-# Initialize df and df_returns
-df = pd.DataFrame()
-for asset in assets:
-    raw = yf.download(asset, start=start, end=end, auto_adjust = False)
-    df[asset] = raw['Adj Close']
+# Extended start date to ensure we have 50+ days of data before 2019-01-01
+# This allows Problem 2 to have valid weights on Day 1.
+extended_start = "2018-09-01"
 
+# Initialize df and df_returns
+# 1. Download full history first
+full_df = pd.DataFrame()
+for asset in assets:
+    # Download from the earlier date
+    raw = yf.download(asset, start=extended_start, end=end, auto_adjust=False)
+    full_df[asset] = raw['Adj Close']
+
+# 2. Create the specific slice required for the assignment (df)
+df = full_df.loc[start:end]
+
+# 3. Create returns for the assignment period (df_returns)
+# Note: First row (2019-01-01) will be NaN/0 because it's the start of this slice
 df_returns = df.pct_change().fillna(0)
+
+# 4. Create full returns for calculation (Problem 2)
+# This includes the data from 2018
+df_full_returns = full_df.pct_change().fillna(0)
 
 
 """
@@ -62,6 +78,9 @@ class EqualWeightPortfolio:
         """
         TODO: Complete Task 1 Below
         """
+        n_assets = len(assets)
+        if n_assets > 0:
+            self.portfolio_weights[assets] = 1.0 / n_assets
 
         """
         TODO: Complete Task 1 Above
@@ -113,8 +132,40 @@ class RiskParityPortfolio:
         """
         TODO: Complete Task 2 Below
         """
+        # 使用 rolling window 的 inverse-vol 策略
+        # Iterate from lookback+1 to the end of the dataframe
+        for i in range(self.lookback + 1, len(df)):
+            # Slice the returns window [i - lookback : i]
+            # This ensures we only use past data (up to i-1) for decision at i
+            window_ret = df_returns[assets].iloc[i - self.lookback : i]
 
+            # Calculate standard deviation (volatility)
+            sigma = window_ret.std()
+            
+            # Calculate inverse volatility
+            # Replace 0 with NaN to handle potential division by zero
+            inv_vol = 1.0 / sigma.replace(0, np.nan)
 
+            # Check if all values are NaN (e.g., if window is empty or all constant)
+            if np.isnan(inv_vol).all():
+                # Fallback to equal weights
+                w = np.ones(len(assets)) / len(assets)
+            else:
+                # Fill NaN with 0.0 (assets with 0 vol get 0 weight in inverse logic usually, 
+                # but here 0 vol became NaN. Safe fallback)
+                inv_vol = inv_vol.fillna(0.0)
+                total = inv_vol.sum()
+                
+                if total == 0:
+                    w = np.ones(len(assets)) / len(assets)
+                else:
+                    w = inv_vol / total  
+
+            # Assign weights to the current date
+            self.portfolio_weights.loc[df.index[i], assets] = w.values
+
+        # Ensure excluded asset (SPY) is 0.0
+        self.portfolio_weights.loc[:, self.exclude] = 0.0  
 
         """
         TODO: Complete Task 2 Above
@@ -128,7 +179,7 @@ class RiskParityPortfolio:
         if not hasattr(self, "portfolio_weights"):
             self.calculate_weights()
 
-        # Calculate the portfolio returns
+        # Calculate the portfolio returns using the assignment period returns
         self.portfolio_returns = df_returns.copy()
         assets = df.columns[df.columns != self.exclude]
         self.portfolio_returns["Portfolio"] = (
@@ -188,10 +239,17 @@ class MeanVariancePortfolio:
                 TODO: Complete Task 3 Below
                 """
 
-                # Sample Code: Initialize Decision w and the Objective
-                # NOTE: You can modify the following code
-                w = model.addMVar(n, name="w", ub=1)
-                model.setObjective(w.sum(), gp.GRB.MAXIMIZE)
+                # Variables: weights (long-only)
+                w = model.addMVar(n, name="w", lb=0.0, ub=1.0)
+                
+                # Constraint: Sum of weights = 1
+                model.addConstr(w.sum() == 1, name="budget")
+                
+                # Objective: Maximize (Return - Gamma/2 * Risk)
+                risk_term = 0.5 * gamma * (w @ Sigma @ w)
+                return_term = w @ mu
+                
+                model.setObjective(return_term - risk_term, gp.GRB.MAXIMIZE)
 
                 """
                 TODO: Complete Task 3 Above
@@ -215,7 +273,6 @@ class MeanVariancePortfolio:
                     solution = []
                     for i in range(n):
                         var = model.getVarByName(f"w[{i}]")
-                        # print(f"w {i} = {var.X}")
                         solution.append(var.X)
 
         return solution
